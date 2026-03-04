@@ -1,27 +1,28 @@
+"""
+Documently — Perfis de linguagem
+Cada perfil define:
+  - triggers:     arquivos que identificam o tipo de projeto
+  - extensions:   extensões de arquivo a analisar
+  - ignore_dirs:  pastas a ignorar (build, deps, cache)
+  - lang_label:   nome da linguagem para o prompt
+  - prompt_focus: instruções específicas para o modelo
+
+Para adicionar uma nova linguagem, basta copiar um bloco
+e ajustar os campos acima.
+"""
+
+import os
 from pathlib import Path
 
-# ── Detecção de perfil ────────────────────────────────────────────────
-
-def detect_profile(project_path: Path) -> dict:
-    """Detecta o perfil do projeto pelos arquivos de configuração presentes."""
-    files_in_root = {f.name for f in project_path.iterdir() if f.is_file()}
-
-    for profile_name, profile in PROFILES.items():
-        if profile_name == "fallback":
-            continue
-        for trigger in profile["triggers"]:
-            if trigger in files_in_root:
-                print(f"   🔎 Perfil detectado: {profile_name} (trigger: {trigger})")
-                return profile
-
-    print(f"   🔎 Nenhum perfil detectado, usando fallback com extensões do env.")
-    return PROFILES["fallback"]
-
-
-# ── Perfis por tipo de projeto ────────────────────────────────────────
 PROFILES = {
     "solidity": {
-        "triggers": ["hardhat.config.js", "hardhat.config.ts", "truffle-config.js", "foundry.toml", "brownie-config.yaml"],
+        "triggers": [
+            "hardhat.config.js",
+            "hardhat.config.ts",
+            "truffle-config.js",
+            "foundry.toml",
+            "brownie-config.yaml",
+        ],
         "extensions": [".sol"],
         "ignore_dirs": {"artifacts", "cache", "out", "node_modules", ".git"},
         "lang_label": "Solidity",
@@ -47,7 +48,13 @@ PROFILES = {
         ),
     },
     "java": {
-        "triggers": ["pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"],
+        "triggers": [
+            "pom.xml",
+            "build.gradle",
+            "build.gradle.kts",
+            "settings.gradle",
+            "settings.gradle.kts",
+        ],
         "extensions": [".java"],
         "ignore_dirs": {"target", "build", "bin", ".gradle", ".mvn", ".git"},
         "lang_label": "Java",
@@ -55,7 +62,7 @@ PROFILES = {
             "Documente este código Java com foco em:\n"
             "- Classes, interfaces e responsabilidades\n"
             "- Métodos públicos e suas assinaturas\n"
-            "- Anotações relevantes (Spring, JPA, etc)\n"
+            "- Anotações relevantes (Spring, JPA, Lombok, etc)\n"
             "- Padrões de design identificados (singleton, factory, etc)"
         ),
     },
@@ -100,7 +107,9 @@ PROFILES = {
     },
     "fallback": {
         "triggers": [],
-        "extensions": list(set(os.getenv("EXTENSIONS", ".sol,.py,.js,.ts,.go,.rs,.java").split(","))),
+        "extensions": list(set(
+            os.getenv("EXTENSIONS", ".sol,.py,.js,.ts,.go,.rs,.java").split(",")
+        )),
         "ignore_dirs": {".git", "node_modules", "target", "build", "dist", "__pycache__"},
         "lang_label": "código",
         "prompt_focus": (
@@ -111,3 +120,19 @@ PROFILES = {
         ),
     },
 }
+
+
+def detect_profile(project_path: Path) -> dict:
+    """Detecta o perfil do projeto pelos arquivos de configuração presentes na raiz."""
+    files_in_root = {f.name for f in project_path.iterdir() if f.is_file()}
+
+    for profile_name, profile in PROFILES.items():
+        if profile_name == "fallback":
+            continue
+        for trigger in profile["triggers"]:
+            if trigger in files_in_root:
+                print(f"[profiles] perfil detectado: {profile_name} (trigger: {trigger})", flush=True)
+                return profile
+
+    print("[profiles] nenhum perfil detectado, usando fallback", flush=True)
+    return PROFILES["fallback"]

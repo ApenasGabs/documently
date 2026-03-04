@@ -1,0 +1,335 @@
+"""
+Documently — Setup interativo
+Detecta hardware, recomenda modelo e gera .env para o docker-compose.
+Funciona em Linux, Mac e Windows 10/11.
+"""
+
+import os
+import sys
+import json
+import shutil
+import platform
+import subprocess
+from pathlib import Path
+
+# ── Cores ANSI ────────────────────────────────────────────────────────
+# Windows 10+ suporta ANSI no terminal moderno (Windows Terminal, PowerShell 7+)
+# Para cmd.exe antigo, desativa as cores graciosamente
+
+def supports_color() -> bool:
+    if platform.system() == "Windows":
+        # Tenta habilitar ANSI no Windows
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
+            return True
+        except Exception:
+            return False
+    return hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
+
+USE_COLOR = supports_color()
+
+class C:
+    """Cores para o terminal."""
+    RESET  = "\033[0m"   if USE_COLOR else ""
+    BOLD   = "\033[1m"   if USE_COLOR else ""
+    DIM    = "\033[2m"   if USE_COLOR else ""
+
+    # Texto
+    WHITE  = "\033[97m"  if USE_COLOR else ""
+    GRAY   = "\033[90m"  if USE_COLOR else ""
+
+    # Status
+    GREEN  = "\033[92m"  if USE_COLOR else ""
+    YELLOW = "\033[93m"  if USE_COLOR else ""
+    RED    = "\033[91m"  if USE_COLOR else ""
+    BLUE   = "\033[94m"  if USE_COLOR else ""
+    CYAN   = "\033[96m"  if USE_COLOR else ""
+    PURPLE = "\033[95m"  if USE_COLOR else ""
+
+def success(msg):  print(f"{C.GREEN}  ✅ {msg}{C.RESET}")
+def warn(msg):     print(f"{C.YELLOW}  ⚠️  {msg}{C.RESET}")
+def error(msg):    print(f"{C.RED}  ❌ {msg}{C.RESET}")
+def info(msg):     print(f"{C.CYAN}  ℹ️  {msg}{C.RESET}")
+def step(msg):     print(f"\n{C.BOLD}{C.WHITE}{msg}{C.RESET}")
+def dim(msg):      print(f"{C.GRAY}{msg}{C.RESET}")
+def highlight(msg):print(f"{C.PURPLE}{C.BOLD}{msg}{C.RESET}")
+
+
+# ── Detecção de hardware ──────────────────────────────────────────────
+
+def get_ram_gb() -> int:
+    """Retorna RAM total em GB."""
+    system = platform.system()
+    try:
+        if system == "Linux":
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    if line.startswith("MemTotal"):
+                        kb = int(line.split()[1])
+                        return kb // 1024 // 1024
+        elif system == "Darwin":  # Mac
+            out = subprocess.check_output(["sysctl", "-n", "hw.memsize"]).decode()
+            return int(out.strip()) // 1024 // 1024 // 1024
+        elif system == "Windows":
+            out = subprocess.check_output(
+                ["wmic", "computersystem", "get", "TotalPhysicalMemory"],
+                stderr=subprocess.DEVNULL
+            ).decode()
+            for line in out.splitlines():
+                line = line.strip()
+                if line.isdigit():
+                    return int(line) // 1024 // 1024 // 1024
+    except Exception:
+        pass
+    return 0
+
+
+def get_gpu_info() -> dict:
+    """Retorna info da GPU Nvidia via nvidia-smi."""
+    if not shutil.which("nvidia-smi"):
+        return {"found": False}
+    try:
+        out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
+            stderr=subprocess.DEVNULL
+        ).decode().strip()
+        if not out:
+            return {"found": False}
+        parts = out.split(",")
+        name = parts[0].strip()
+        vram_mb = int(parts[1].strip())
+        return {"found": True, "name": name, "vram_gb": round(vram_mb / 1024, 1)}
+    except Exception:
+        return {"found": False}
+
+
+# ── Modelos disponíveis ───────────────────────────────────────────────
+
+MODELS = [
+    {
+        "id": "qwen2.5-coder:3b",
+        "label": "Qwen 2.5 Coder 3B",
+        "size_gb": 2.0,
+        "min_vram": 0,    # roda em CPU também
+        "min_ram": 8,
+        "quality": "boa",
+        "speed": "rápida",
+        "best_for": "uso geral, máquinas modestas",
+    },
+    {
+        "id": "deepseek-coder:6.7b-q4_K_M",
+        "label": "DeepSeek Coder 6.7B (q4)",
+        "size_gb": 4.0,
+        "min_vram": 4,
+        "min_ram": 12,
+        "quality": "ótima",
+        "speed": "média",
+        "best_for": "análise detalhada, contratos Solidity",
+    },
+    {
+        "id": "codellama:7b-q4_K_M",
+        "label": "Code Llama 7B (q4)",
+        "size_gb": 4.1,
+        "min_vram": 4,
+        "min_ram": 12,
+        "quality": "boa",
+        "speed": "média",
+        "best_for": "Java, Python, código geral",
+    },
+    {
+        "id": "codellama:13b-q4_K_M",
+        "label": "Code Llama 13B (q4)",
+        "size_gb": 7.9,
+        "min_vram": 8,
+        "min_ram": 16,
+        "quality": "excelente",
+        "speed": "lenta",
+        "best_for": "projetos grandes, máxima qualidade",
+    },
+]
+
+
+def recommend_model(ram_gb: int, gpu: dict) -> dict:
+    """Escolhe o melhor modelo para o hardware detectado."""
+    vram = gpu["vram_gb"] if gpu["found"] else 0
+
+    candidates = [
+        m for m in MODELS
+        if ram_gb >= m["min_ram"] and (vram >= m["min_vram"] or m["min_vram"] == 0)
+    ]
+    # Prefere o mais capaz dentro do hardware disponível
+    return candidates[-1] if candidates else MODELS[0]
+
+
+# ── Interface interativa ──────────────────────────────────────────────
+
+def ask(prompt: str, default: str = "") -> str:
+    """Pergunta com valor padrão destacado."""
+    default_hint = f"{C.DIM} [{default}]{C.RESET}" if default else ""
+    try:
+        answer = input(f"{C.BOLD}{C.WHITE}  {prompt}{default_hint}: {C.RESET}").strip()
+        return answer if answer else default
+    except (KeyboardInterrupt, EOFError):
+        print("\n")
+        sys.exit(0)
+
+
+def ask_yes_no(prompt: str, default: bool = True) -> bool:
+    hint = "S/n" if default else "s/N"
+    answer = ask(f"{prompt} ({hint})", "s" if default else "n")
+    return answer.lower() in ("s", "sim", "y", "yes", "")
+
+
+def choose_model(current: dict) -> dict:
+    """Menu para o usuário escolher outro modelo."""
+    print(f"\n{C.BOLD}  Modelos disponíveis:{C.RESET}\n")
+    for i, m in enumerate(MODELS):
+        marker = f"{C.GREEN}▶ {C.RESET}" if m["id"] == current["id"] else "  "
+        print(
+            f"  {marker}{C.BOLD}{C.WHITE}[{i+1}]{C.RESET} "
+            f"{C.CYAN}{m['label']}{C.RESET}\n"
+            f"      {C.GRAY}Tamanho: ~{m['size_gb']}GB  |  "
+            f"Qualidade: {m['quality']}  |  "
+            f"Velocidade: {m['speed']}{C.RESET}\n"
+            f"      {C.DIM}Ideal para: {m['best_for']}{C.RESET}\n"
+        )
+
+    choice = ask(f"Escolha [1-{len(MODELS)}] ou Enter para manter o recomendado",
+                 str(MODELS.index(current) + 1))
+    try:
+        idx = int(choice) - 1
+        if 0 <= idx < len(MODELS):
+            return MODELS[idx]
+    except ValueError:
+        pass
+    return current
+
+
+# ── Geração do .env ───────────────────────────────────────────────────
+
+def generate_env(model: dict, gpu: dict, ram_gb: int) -> dict:
+    """Monta o dicionário de configurações."""
+    gpu_layers = 0
+    if gpu["found"]:
+        # Estima layers com base na VRAM (aprox 200MB por layer)
+        gpu_layers = min(35, int((gpu["vram_gb"] * 1024) / 200))
+
+    return {
+        "OLLAMA_MODEL": model["id"],
+        "MAX_TOKENS_PER_CHUNK": "3000",
+        "EXTENSIONS": ".sol,.py,.js,.ts,.go,.rs,.java",
+        "OLLAMA_NUM_GPU_LAYERS": str(gpu_layers),
+        "OLLAMA_NUM_PARALLEL": "1",
+        "OLLAMA_MAX_LOADED_MODELS": "1",
+    }
+
+
+def write_env(config: dict):
+    lines = [
+        "# Gerado pelo setup.py do Documently",
+        "# Para reconfigurar: python3 setup.py\n",
+    ]
+    for key, value in config.items():
+        lines.append(f"{key}={value}")
+    Path(".env").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+# ── Main ──────────────────────────────────────────────────────────────
+
+def main():
+    os.system("cls" if platform.system() == "Windows" else "clear")
+
+    # Header
+    print(f"\n{C.BOLD}{C.PURPLE}{'─' * 50}{C.RESET}")
+    highlight("   🔍 Documently — Setup")
+    print(f"{C.BOLD}{C.PURPLE}{'─' * 50}{C.RESET}\n")
+    dim("   Vamos configurar o ambiente para o seu hardware.\n")
+
+    # ── 1. Detecta hardware ───────────────────────────────────────────
+    step("1 / 4  Detectando hardware...")
+
+    ram_gb = get_ram_gb()
+    gpu    = get_gpu_info()
+
+    if ram_gb:
+        success(f"RAM detectada: {C.CYAN}{ram_gb} GB{C.RESET}")
+    else:
+        warn("Não foi possível detectar a RAM.")
+        ram_gb = int(ask("Digite a RAM total em GB", "16"))
+
+    if gpu["found"]:
+        success(
+            f"GPU detectada: {C.CYAN}{gpu['name']}{C.RESET} "
+            f"com {C.CYAN}{gpu['vram_gb']} GB{C.RESET} de VRAM"
+        )
+    else:
+        warn("Nenhuma GPU Nvidia detectada — o Ollama usará a CPU.")
+        if ask_yes_no("Você tem GPU Nvidia mas o nvidia-smi não foi encontrado?", default=False):
+            vram = float(ask("Quantos GB de VRAM?", "4"))
+            name = ask("Nome da GPU (opcional)", "Nvidia GPU")
+            gpu = {"found": True, "name": name, "vram_gb": vram}
+
+    # ── 2. Recomenda modelo ───────────────────────────────────────────
+    step("2 / 4  Recomendando modelo...")
+
+    recommended = recommend_model(ram_gb, gpu)
+
+    print(f"\n  {C.BOLD}Modelo recomendado:{C.RESET}")
+    print(
+        f"  {C.GREEN}▶ {C.CYAN}{C.BOLD}{recommended['label']}{C.RESET}\n"
+        f"  {C.GRAY}  Tamanho: ~{recommended['size_gb']}GB  |  "
+        f"Qualidade: {recommended['quality']}  |  "
+        f"Velocidade: {recommended['speed']}{C.RESET}\n"
+        f"  {C.DIM}  Ideal para: {recommended['best_for']}{C.RESET}\n"
+    )
+
+    chosen = recommended
+    if not ask_yes_no("Usar este modelo?", default=True):
+        chosen = choose_model(recommended)
+        print(f"\n  {C.GREEN}✔ Escolhido:{C.RESET} {C.CYAN}{chosen['label']}{C.RESET}")
+
+    # ── 3. Gera .env ──────────────────────────────────────────────────
+    step("3 / 4  Gerando .env...")
+
+    config = generate_env(chosen, gpu, ram_gb)
+
+    print(f"\n  {C.DIM}{'─' * 44}{C.RESET}")
+    for key, value in config.items():
+        print(f"  {C.YELLOW}{key}{C.RESET}={C.WHITE}{value}{C.RESET}")
+    print(f"  {C.DIM}{'─' * 44}{C.RESET}\n")
+
+    write_env(config)
+    success(f"Arquivo {C.WHITE}.env{C.RESET}{C.GREEN} criado com sucesso!")
+
+    # ── 4. Finaliza ───────────────────────────────────────────────────
+    step("4 / 4  Tudo pronto!")
+
+    info(f"Coloque seus projetos em {C.WHITE}./projects/{C.RESET}")
+    info(f"A documentação será gerada em {C.WHITE}./docs/{C.RESET}")
+
+    print()
+    if ask_yes_no("Rodar agora? (docker compose up)", default=True):
+        print()
+        info("Iniciando... (pressione Ctrl+C para parar)\n")
+        try:
+          subprocess.run(["docker", "compose", "up"], check=True)
+        except subprocess.CalledProcessError as e:
+            print()
+            error("Docker retornou um erro. Tente rodar manualmente:")
+            info(f"  docker compose down && docker compose up")
+        except KeyboardInterrupt:
+            print()
+            warn("Interrompido.")
+        except FileNotFoundError:
+            error("Docker não encontrado. Instale em: https://docs.docker.com/get-docker/")
+    else:
+        print()
+        info(f"Quando quiser rodar: {C.WHITE}docker compose up{C.RESET}")
+
+    print(f"\n{C.BOLD}{C.PURPLE}{'─' * 50}{C.RESET}\n")
+
+
+if __name__ == "__main__":
+    main()

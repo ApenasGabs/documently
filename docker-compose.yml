@@ -1,17 +1,15 @@
-version: "3.9"
-
 services:
   # ── IA local (Ollama) ──────────────────────────────────────────────
   ollama:
     image: ollama/ollama:latest
-    container_name: ollama
     restart: unless-stopped
     ports:
       - "11434:11434"
     volumes:
-      - ollama_models:/root/.ollama          # modelos persistem entre reinicializações
+      - ollama_models:/root/.ollama
+    env_file: .env
     environment:
-      - OLLAMA_NUM_PARALLEL=1                # 1 request por vez (economiza RAM)
+      - OLLAMA_NUM_PARALLEL=1
       - OLLAMA_MAX_LOADED_MODELS=1
     deploy:
       resources:
@@ -20,23 +18,22 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-    # Se não tiver GPU nvidia, comente o bloco "deploy" acima
-    # e descomente a linha abaixo:
-    # runtime: runc
+  # Sem GPU nvidia? Comente o bloco "deploy" acima.
 
-  # ── Setup: baixa o modelo automaticamente ─────────────────────────
+  # ── Setup: baixa o modelo definido no .env ────────────────────────
   ollama-setup:
     image: ollama/ollama:latest
-    container_name: ollama-setup
     depends_on:
       - ollama
+    env_file: .env
     entrypoint: >
       sh -c "
         sleep 5 &&
-        ollama pull qwen2.5-coder:3b
+        ollama pull $OLLAMA_MODEL
       "
     environment:
       - OLLAMA_HOST=http://ollama:11434
+      - OLLAMA_MODEL=${OLLAMA_MODEL}
     volumes:
       - ollama_models:/root/.ollama
 
@@ -45,19 +42,15 @@ services:
     build:
       context: ./analyzer
       dockerfile: Dockerfile
-    container_name: analyzer
     depends_on:
-      - ollama
-    restart: "no"                            # roda e para (não fica em loop infinito)
+      ollama-setup:
+        condition: service_completed_successfully
+    restart: "no"
+    env_file: .env
     environment:
       - OLLAMA_HOST=http://ollama:11434
-      - OLLAMA_MODEL=qwen2.5-coder:3b
-      - MAX_TOKENS_PER_CHUNK=3000
-      - EXTENSIONS=.sol,.py,.js,.ts,.go,.rs  # extensões a analisar
     volumes:
-      # Projetos lidos como read-only
-      - ./projeto1:/projects:ro
-      # Docs e status com escrita
+      - ./projects:/projects:ro
       - ./docs:/output/docs
       - ./status:/output/status
 
