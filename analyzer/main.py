@@ -1,6 +1,6 @@
 """
 Code Analyzer — Loop principal
-Varre /projects/*, analisa cada arquivo e grava:
+Varre /projects/*, detecta o tipo de projeto automaticamente e grava:
   /output/docs/<projeto>.md
   /output/status/<projeto>.json
 """
@@ -11,18 +11,19 @@ import time
 import requests
 from pathlib import Path
 from datetime import datetime
+from profiles import PROFILES, detect_profile
 
 # ── Configuração via env ──────────────────────────────────────────────
 OLLAMA_HOST  = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 MODEL        = os.getenv("OLLAMA_MODEL", "qwen2.5-coder:3b")
 MAX_TOKENS   = int(os.getenv("MAX_TOKENS_PER_CHUNK", 3000))
-EXTENSIONS   = set(os.getenv("EXTENSIONS", ".sol,.py,.js,.ts,.go,.rs").split(","))
 PROJECTS_DIR = Path("/projects")
 DOCS_DIR     = Path("/output/docs")
 STATUS_DIR   = Path("/output/status")
 
 DOCS_DIR.mkdir(parents=True, exist_ok=True)
 STATUS_DIR.mkdir(parents=True, exist_ok=True)
+
 
 
 # ── Helpers ───────────────────────────────────────────────────────────
@@ -47,7 +48,7 @@ def load_status(project_name: str) -> dict:
     path = STATUS_DIR / f"{project_name}.json"
     if path.exists():
         return json.loads(path.read_text())
-    return {"project": project_name, "files": {}, "started_at": None, "finished_at": None}
+    return {"project": project_name, "files": {}, "started_at": None, "finished_at": None, "profile": None}
 
 
 def save_status(project_name: str, status: dict):
@@ -72,14 +73,12 @@ def chunk_text(content: str, max_tokens: int = MAX_TOKENS) -> list[str]:
     return chunks or [""]
 
 
-def analyze_chunk(chunk: str, context_summary: str, filename: str, chunk_idx: int, total: int) -> str:
-    """Envia chunk para Ollama e retorna a análise."""
+def analyze_chunk(chunk: str, context_summary: str, filename: str,
+                  chunk_idx: int, total: int, profile: dict) -> str:
+    """Envia chunk para Ollama com prompt especializado pelo perfil."""
     ext = Path(filename).suffix
-    lang_map = {".sol": "Solidity", ".py": "Python", ".js": "JavaScript",
-                ".ts": "TypeScript", ".go": "Go", ".rs": "Rust"}
-    lang = lang_map.get(ext, "código")
 
-    prompt = f"""Você é um analisador de código especialista. Analise este trecho de {lang}.
+    prompt = f"""Você é um analisador de código especialista em {profile['lang_label']}.
 
 Contexto já analisado (resumo): {context_summary[-600:] if context_summary else "Nenhum — este é o início do arquivo."}
 
@@ -89,12 +88,9 @@ Arquivo: {filename}  (chunk {chunk_idx + 1} de {total})
 {chunk}
 ```
 
-Responda em português com:
-1. **O que faz**: descrição objetiva do trecho
-2. **Funções/contratos**: liste nomes e responsabilidades
-3. **Atenções**: riscos, bugs potenciais ou más práticas (se houver)
+{profile['prompt_focus']}
 
-Seja conciso (máx 300 palavras)."""
+Responda em português, de forma concisa (máx 300 palavras)."""
 
     response = requests.post(
         f"{OLLAMA_HOST}/api/generate",
@@ -116,7 +112,8 @@ Seja conciso (máx 300 palavras)."""
 
 # ── Processamento ─────────────────────────────────────────────────────
 
-def process_file(filepath: Path, context_window: list, status_files: dict) -> str:
+def process_file(filepath: Path, context_window: list,
+                 status_files: dict, profile: dict) -> str:
     """Analisa um arquivo inteiro, chunk por chunk. Retorna a doc gerada."""
     rel = str(filepath)
     file_status = status_files.get(rel, {"chunks_done": 0, "total_chunks": 0, "done": False})
@@ -132,19 +129,18 @@ def process_file(filepath: Path, context_window: list, status_files: dict) -> st
 
     if file_status.get("done"):
         print(f"   ⏭  {filepath.name} já analisado, pulando.")
-        return ""  # já processado em execução anterior
+        return ""
 
     doc_parts = [f"\n---\n## 📄 `{filepath.name}`\n"]
-    context_summary = "\n".join(context_window[-5:])  # últimos 5 resumos
+    context_summary = "\n".join(context_window[-5:])
 
     for i, chunk in enumerate(chunks):
         if i < file_status["chunks_done"]:
-            continue  # retoma de onde parou
+            continue
         print(f"      chunk {i+1}/{len(chunks)}...")
-        analysis = analyze_chunk(chunk, context_summary, filepath.name, i, len(chunks))
+        analysis = analyze_chunk(chunk, context_summary, filepath.name, i, len(chunks), profile)
         doc_parts.append(f"### Chunk {i+1}/{len(chunks)}\n\n{analysis}\n")
 
-        # Atualiza janela de contexto (sliding window)
         context_window.append(f"[{filepath.name} c{i+1}]: {analysis[:200]}")
         if len(context_window) > 20:
             context_window.pop(0)
@@ -168,40 +164,46 @@ def process_project(project_path: Path):
         print(f"✅ {name} já finalizado em {status['finished_at']}. Pulando.")
         return
 
+    # Detecta perfil
+    profile = detect_profile(project_path)
+    status["profile"] = profile["lang_label"]
+
     if not status["started_at"]:
         status["started_at"] = datetime.now().isoformat()
 
-    # Coleta arquivos relevantes
+    # Coleta arquivos ignorando pastas do perfil
     files = sorted([
-        f for ext in EXTENSIONS
+        f for ext in profile["extensions"]
         for f in project_path.rglob(f"*{ext}")
-        if ".git" not in f.parts
+        if not any(part in profile["ignore_dirs"] for part in f.parts)
     ])
 
     if not files:
-        print(f"⚠️  Nenhum arquivo com extensões {EXTENSIONS} encontrado em {name}.")
+        print(f"⚠️  Nenhum arquivo {profile['extensions']} encontrado em {name}.")
         status["finished_at"] = datetime.now().isoformat()
         save_status(name, status)
         return
 
-    print(f"📂 {len(files)} arquivo(s) encontrado(s)")
+    print(f"📂 {len(files)} arquivo(s) encontrado(s) [{profile['lang_label']}]")
 
     doc_path = DOCS_DIR / f"{name}.md"
-    doc_header = f"# 📦 Documentação: `{name}`\n\n_Gerado em {datetime.now().strftime('%d/%m/%Y %H:%M')}_\n"
+    doc_header = (
+        f"# 📦 Documentação: `{name}`\n\n"
+        f"_Gerado em {datetime.now().strftime('%d/%m/%Y %H:%M')} · "
+        f"Perfil: **{profile['lang_label']}**_\n"
+    )
 
     context_window: list[str] = []
     all_docs = [doc_header]
 
     for filepath in files:
-        rel = str(filepath)
         file_label = filepath.relative_to(project_path)
         print(f"\n   📄 {file_label}")
 
-        doc_chunk = process_file(filepath, context_window, status["files"])
+        doc_chunk = process_file(filepath, context_window, status["files"], profile)
         if doc_chunk:
             all_docs.append(doc_chunk)
 
-        # Salva progresso após cada arquivo
         doc_path.write_text("\n".join(all_docs), encoding="utf-8")
         save_status(name, status)
         print(f"      💾 Status salvo")
