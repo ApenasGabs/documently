@@ -16,14 +16,17 @@ from analyzer import (
     MODEL, MAX_TOKENS, OLLAMA_HOST,
 )
 from profiles import detect_profile
+from frameworks import detect_framework
 
 # Suporta paths customizados (Windows nativo) ou defaults Docker
 PROJECTS_DIR = Path(os.getenv("PROJECTS_DIR", "/projects"))
 DOCS_DIR     = Path(os.getenv("DOCS_DIR",     "/output/docs"))
 STATUS_DIR   = Path(os.getenv("STATUS_DIR",   "/output/status"))
+LOGS_DIR     = Path(os.getenv("TELEMETRY_LOG_DIR", "/output/logs"))
 
 DOCS_DIR.mkdir(parents=True, exist_ok=True)
 STATUS_DIR.mkdir(parents=True, exist_ok=True)
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def process_project(project_path: Path):
@@ -39,6 +42,9 @@ def process_project(project_path: Path):
     profile = detect_profile(project_path)
     status["profile"] = profile["lang_label"]
     log_info(f"perfil: {profile['lang_label']} | modelo: {MODEL}", name)
+    # Detecta framework (determinístico + fallback IA)
+    framework = detect_framework(project_path, profile)
+    status["framework"] = framework
 
     if not status["started_at"]:
         status["started_at"] = datetime.now().isoformat()
@@ -63,17 +69,24 @@ def process_project(project_path: Path):
 
     for i, filepath in enumerate(files):
         log_info(f"[{i+1}/{len(files)}] {filepath.relative_to(project_path)}", name)
-        result = analyze_file(
-            filepath, project_path, context_window,
-            status["files"], profile, name, DOCS_DIR,
-        )
-        if result:
-            file_docs.append(result)
+        try:
+            result = analyze_file(
+                filepath, project_path, context_window,
+                status["files"], profile, name, DOCS_DIR,
+            )
+            if result:
+                file_docs.append(result)
+        except Exception as e:
+            rel = str(filepath)
+            status["files"].setdefault(rel, {})
+            status["files"][rel]["done"] = False
+            status["files"][rel]["error"] = str(e)
+            log_warn(f"falha ao analisar arquivo, seguindo para o próximo: {e}", name)
         save_status(STATUS_DIR, name, status)
 
     # Resumo geral com árvore de arquivos
     elapsed_min  = (time.time() - start_time) / 60
-    summary      = generate_summary(name, project_path, profile, file_docs, elapsed_min)
+    summary = generate_summary(name, project_path, profile, file_docs, elapsed_min, framework)
     summary_path = DOCS_DIR / name / "_resumo.md"
     save_summary(summary_path, summary, name)
 
@@ -103,6 +116,7 @@ def main():
     log_ok("todos os projetos concluídos!")
     log_info("docs   → /output/docs/")
     log_info("status → /output/status/")
+    log_info(f"logs   → {LOGS_DIR}")
 
 
 if __name__ == "__main__":

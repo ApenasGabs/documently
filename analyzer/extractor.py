@@ -14,6 +14,7 @@ Instalação das grammars (adicionar ao Dockerfile):
 """
 
 import re
+import ctypes
 from pathlib import Path
 from dataclasses import dataclass, field
 
@@ -129,9 +130,27 @@ def _try_treesitter(content: str, lang_key: str) -> list[FunctionNode] | None:
         import importlib
         grammar_mod = importlib.import_module(module_name)
 
-        # API tree-sitter >= 0.21
-        lang     = tree_sitter.Language(grammar_mod.language())
-        parser   = tree_sitter.Parser(lang)
+        # Compatibilidade com APIs diferentes do py-tree-sitter
+        raw_lang = grammar_mod.language()
+
+        if type(raw_lang).__name__ == "PyCapsule":
+            capsule_get_pointer = ctypes.pythonapi.PyCapsule_GetPointer
+            capsule_get_pointer.restype = ctypes.c_void_p
+            capsule_get_pointer.argtypes = [ctypes.py_object, ctypes.c_char_p]
+            raw_lang = capsule_get_pointer(raw_lang, b"tree_sitter.Language")
+            raw_lang = int(raw_lang)
+
+        try:
+            lang = tree_sitter.Language(raw_lang, lang_key)
+        except TypeError:
+            lang = tree_sitter.Language(raw_lang)
+
+        parser = tree_sitter.Parser()
+        try:
+            parser.set_language(lang)
+        except AttributeError:
+            parser = tree_sitter.Parser(lang)
+
         tree     = parser.parse(content.encode())
         query    = lang.query(query_str)
         captures = query.captures(tree.root_node)
@@ -139,9 +158,26 @@ def _try_treesitter(content: str, lang_key: str) -> list[FunctionNode] | None:
         nodes: list[FunctionNode] = []
         seen: set[tuple] = set()
 
-        # captures é dict[str, list[Node]] na API 0.21+
-        bodies = captures.get("body", [])
-        names  = {n.start_byte: n for n in captures.get("name", [])}
+        # Compatibilidade de retorno: dict[str, list[Node]] ou list[(Node, capture_name)]
+        if isinstance(captures, dict):
+            bodies = captures.get("body", [])
+            names  = {n.start_byte: n for n in captures.get("name", [])}
+        else:
+            bodies = [node for node, cap in captures if cap == "body"]
+            names  = {
+                node.start_byte: node
+                for node, cap in captures
+                if cap == "name"
+            }
+
+
+        def find_class_name_before(pos):
+            """Busca o nome da classe mais próxima antes de pos."""
+            class_pat = re.compile(r'class\s+(\w+)')
+            before = content[:pos]
+            for m in reversed(list(class_pat.finditer(before))):
+                return m.group(1)
+            return None
 
         for body_node in bodies:
             key = (body_node.start_byte, body_node.end_byte)
@@ -151,15 +187,36 @@ def _try_treesitter(content: str, lang_key: str) -> list[FunctionNode] | None:
 
             # Tenta achar o nome associado
             name_node = names.get(body_node.start_byte)
-            name = name_node.text.decode() if name_node else "<anônimo>"
+            name = name_node.text.decode() if name_node else None
             body = content[body_node.start_byte:body_node.end_byte]
+            kind = "class" if "class" in body_node.type else "function"
+
+            # Heurísticas extras para Java
+            if lang_key == "java" and (not name or name == "<anônimo>"):
+                # Construtor: nome igual ao da classe mais próxima
+                if "constructor" in body_node.type:
+                    class_name = find_class_name_before(body_node.start_byte)
+                    if class_name:
+                        name = class_name
+                # Método: tenta regex no corpo
+                elif "method" in body_node.type:
+                    m = re.search(r'(\w+)\s*\(', body)
+                    if m:
+                        name = m.group(1)
+                # Inner class: busca nome anterior
+                elif "class" in body_node.type:
+                    m = re.search(r'class\s+(\w+)', body)
+                    if m:
+                        name = m.group(1)
+            if not name:
+                name = "<anônimo>"
 
             nodes.append(FunctionNode(
                 name       = name,
                 body       = body,
                 start_line = body_node.start_point[0] + 1,
                 end_line   = body_node.end_point[0] + 1,
-                kind       = "class" if "class" in body_node.type else "function",
+                kind       = kind,
             ))
 
         return nodes or None

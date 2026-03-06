@@ -1,11 +1,85 @@
-"""
-Documently — Testes unitários
-Cobre as funções críticas sem precisar do Docker ou Ollama rodando.
+# ══════════════════════════════════════════════════════════════════════
+# 8. Hardware profile: seleção e precedência
+# ══════════════════════════════════════════════════════════════════════
 
-Rodar:
-  python3 tests.py
-  python3 tests.py -v
-"""
+import unittest
+# ══════════════════════════════════════════════════════════════════════
+# 8. Hardware profile: seleção e precedência
+# ══════════════════════════════════════════════════════════════════════
+
+class TestHardwareProfile(unittest.TestCase):
+
+    def test_env_override(self):
+        import os
+        import hardware
+        os.environ["HARDWARE_PROFILE"] = "ultra"
+        self.assertEqual(hardware.detect_hardware_profile(), "ultra")
+        del os.environ["HARDWARE_PROFILE"]
+
+    def test_fallback_mid(self):
+        import hardware
+        self.assertIn(hardware.detect_hardware_profile(), {"low", "mid", "high", "ultra"})
+
+    def test_profile_vars(self):
+        import hardware
+        for key in ["low", "mid", "high", "ultra"]:
+            vars = hardware.get_profile_vars(key)
+            self.assertIn("OLLAMA_NUM_CTX", vars)
+            self.assertIn("MAX_TOKENS_PER_CHUNK", vars)
+            self.assertIn("TRIVIAL_LINE_THRESHOLD", vars)
+            self.assertIn("TRIVIAL_BATCH_SIZE", vars)
+# ══════════════════════════════════════════════════════════════════════
+# 7. Extractor Java: heurísticas de nomeação
+# ══════════════════════════════════════════════════════════════════════
+
+import unittest
+# ══════════════════════════════════════════════════════════════════════
+# 7. Extractor Java: heurísticas de nomeação
+# ══════════════════════════════════════════════════════════════════════
+
+class TestExtractorJavaHeuristics(unittest.TestCase):
+    def setUp(self):
+        import extractor
+        import profiles
+        import frameworks
+        self.extract_functions = extractor.extract_functions
+        self.detect_profile = profiles.detect_profile
+        self.detect_framework = frameworks.detect_framework
+        self.make_project = lambda files: make_project(files)
+
+    def test_java_named_method(self):
+        code = '''
+        public class Foo {
+            public void bar() { System.out.println("ok"); }
+        }
+        '''
+        nodes = self.extract_functions(code, "java", "Foo.java")
+        names = [n.name for n in nodes]
+        self.assertIn("bar", names)
+
+    def test_detect_react(self):
+        tmp = self.make_project(["package.json"])
+        (tmp / "package.json").write_text('{"dependencies": {"react": "^18.0.0"}}')
+        profile = self.detect_profile(tmp)
+        self.assertEqual(self.detect_framework(tmp, profile), "React")
+
+    def test_detect_gradle(self):
+        tmp = self.make_project(["build.gradle"])
+        profile = self.detect_profile(tmp)
+        self.assertEqual(self.detect_framework(tmp, profile), "Gradle")
+
+    def test_detect_android(self):
+        tmp = self.make_project(["AndroidManifest.xml"])
+        profile = self.detect_profile(tmp)
+        self.assertEqual(self.detect_framework(tmp, profile), "Android")
+
+        def test_ambiguous_fallback_ia(self):
+                # Não deve detectar nenhum framework determinístico
+                tmp = self.make_project(["README.md", "foo.txt"])
+                profile = self.detect_profile(tmp)
+                # IA pode retornar 'unknown' se não conseguir identificar
+                fw = self.detect_framework(tmp, profile)
+                self.assertIn(fw, {"unknown", "React", "Vite", "Angular", "Maven", "Gradle", "Android"})
 
 import sys
 import types
@@ -13,6 +87,21 @@ import unittest
 import importlib
 import tempfile
 from pathlib import Path
+
+try:
+    import requests  # noqa: F401
+except ModuleNotFoundError:
+    sys.modules["requests"] = types.SimpleNamespace(
+        get=lambda *args, **kwargs: None,
+        post=lambda *args, **kwargs: None,
+        RequestException=Exception,
+    )
+
+# Garante que o diretório analyzer/ está no sys.path para imports absolutos
+ROOT_DIR     = Path(__file__).parent
+ANALYZER_DIR = ROOT_DIR / "analyzer"
+if str(ANALYZER_DIR) not in sys.path:
+    sys.path.insert(0, str(ANALYZER_DIR))
 
 # ── Path setup ────────────────────────────────────────────────────────
 ROOT_DIR     = Path(__file__).parent
@@ -38,6 +127,9 @@ PROFILES      = _profiles.PROFILES
 detect_profile = _profiles.detect_profile
 chunk_text     = _analyzer.chunk_text
 build_tree     = _analyzer.build_tree
+trim_middle    = _analyzer._trim_middle
+compact_context = _analyzer._compact_context
+fit_prompt_to_budget = _analyzer._fit_prompt_to_budget
 recommend_model = _setup.recommend_model
 generate_env    = _setup.generate_env
 MODELS          = _setup.MODELS
@@ -138,6 +230,36 @@ class TestChunkText(unittest.TestCase):
         for i, chunk in enumerate(chunk_text(content, max_tokens)):
             self.assertLess(len(chunk) // 4, max_tokens * 2,
                 f"Chunk {i} muito grande (~{len(chunk)//4} tokens)")
+
+
+class TestPromptCompaction(unittest.TestCase):
+
+    def test_trim_middle_preserves_edges(self):
+        source = "A" * 80 + "MIOLO" + "B" * 80
+        trimmed = trim_middle(source, 60)
+        self.assertLessEqual(len(trimmed), 60)
+        self.assertTrue(trimmed.startswith("A"))
+        self.assertTrue(trimmed.endswith("B"))
+
+    def test_compact_context_dedupes_and_limits(self):
+        window = [
+            "[a.py]: primeira",
+            "[b.py]: contexto",
+            "[a.py]: atualização",
+            "[c.py]: final",
+        ]
+        compact = compact_context(window, max_items=3, max_chars=120)
+        self.assertIn("[a.py]: atualização", compact)
+        self.assertIn("[b.py]: contexto", compact)
+        self.assertIn("[c.py]: final", compact)
+        self.assertNotIn("[a.py]: primeira", compact)
+
+    def test_fit_prompt_to_budget_reduces_prompt(self):
+        huge_prompt = "x" * (_analyzer.OLLAMA_NUM_CTX * 8)
+        trimmed, predict, prompt_tokens = fit_prompt_to_budget(huge_prompt, _analyzer.OLLAMA_NUM_CTX)
+        self.assertLess(len(trimmed), len(huge_prompt))
+        self.assertGreaterEqual(predict, 64)
+        self.assertLessEqual(prompt_tokens + predict, _analyzer.OLLAMA_NUM_CTX)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -274,6 +396,42 @@ class TestBuildTree(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════════
+# 9. Framework detection: determinístico e IA
+# ══════════════════════════════════════════════════════════════════════
+
+class TestFrameworkDetection(unittest.TestCase):
+    def setUp(self):
+        import frameworks
+        self.detect_framework = frameworks.detect_framework
+        import profiles
+        self.detect_profile = profiles.detect_profile
+        self.make_project = lambda files: make_project(files)
+
+    def test_detect_react(self):
+        tmp = self.make_project(["package.json"])
+        (tmp / "package.json").write_text('{"dependencies": {"react": "^18.0.0"}}')
+        profile = self.detect_profile(tmp)
+        self.assertEqual(self.detect_framework(tmp, profile), "React")
+
+    def test_detect_gradle(self):
+        tmp = self.make_project(["build.gradle"])
+        profile = self.detect_profile(tmp)
+        self.assertEqual(self.detect_framework(tmp, profile), "Gradle")
+
+    def test_detect_android(self):
+        tmp = self.make_project(["AndroidManifest.xml"])
+        profile = self.detect_profile(tmp)
+        self.assertEqual(self.detect_framework(tmp, profile), "Android")
+
+    def test_ambiguous_fallback_ia(self):
+        # Não deve detectar nenhum framework determinístico
+        tmp = self.make_project(["README.md", "foo.txt"])
+        profile = self.detect_profile(tmp)
+        # IA pode retornar 'unknown' se não conseguir identificar
+        fw = self.detect_framework(tmp, profile)
+        self.assertIn(fw, {"unknown", "React", "Vite", "Angular", "Maven", "Gradle", "Android"})
+
+# ══════════════════════════════════════════════════════════════════════
 # Runner
 # ══════════════════════════════════════════════════════════════════════
 
@@ -281,8 +439,8 @@ if __name__ == "__main__":
     print("🧪 Documently — Testes Unitários\n")
     suite  = unittest.TestSuite()
     loader = unittest.TestLoader()
-    for cls in [TestDetectProfile, TestChunkText, TestRecommendModel,
-                TestGenerateEnv, TestIgnoreDirs, TestBuildTree]:
+    for cls in [TestHardwareProfile, TestExtractorJavaHeuristics, TestDetectProfile, TestChunkText, TestPromptCompaction, TestRecommendModel,
+                TestGenerateEnv, TestIgnoreDirs, TestBuildTree, TestFrameworkDetection]:
         suite.addTests(loader.loadTestsFromTestCase(cls))
 
     verbosity = 2 if "-v" in sys.argv else 1

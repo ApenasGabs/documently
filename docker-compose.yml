@@ -70,10 +70,12 @@ services:
     env_file: .env
     environment:
       - OLLAMA_HOST=http://ollama:11434
+      - TELEMETRY_LOG_DIR=/output/logs
     volumes:
       - ./projects:/projects:ro
       - ./docs:/output/docs
       - ./status:/output/status
+      - ./logs:/output/logs
 
 volumes:
   ollama_models:

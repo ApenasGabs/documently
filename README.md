@@ -1,3 +1,43 @@
+## ⚙️ Parâmetros de contexto e limites por etapa
+
+O comportamento do analisador pode ser ajustado via variáveis no `.env`:
+
+| Variável                | Descrição                                              | Default |
+|-------------------------|--------------------------------------------------------|---------|
+| OLLAMA_NUM_CTX          | Tamanho máximo do contexto (tokens) por chamada         | 4096    |
+| SCAN_NUM_PREDICT        | Tokens para etapa de scan (assinaturas)                | 512     |
+| DEEP_NUM_PREDICT        | Tokens para deep dive (função/classe)                  | 1024    |
+| SYNTH_NUM_PREDICT       | Tokens para síntese do arquivo                         | 1024    |
+| SUMMARY_NUM_PREDICT     | Tokens para resumo do projeto                          | 1500    |
+| CONTEXT_WINDOW_SIZE     | Máximo de entradas na janela de contexto entre arquivos | 12      |
+| CONTEXT_SNIPPET_CHARS   | Tamanho máximo do trecho de contexto injetado no prompt | 320     |
+| RUNNING_CONTEXT_CHARS   | Limite do contexto acumulado durante análise do arquivo | 700     |
+| MAX_SCAN_ITEMS          | Máximo de itens listados no passo de scan              | 24      |
+| MAX_DEEP_BODY_CHARS     | Máximo de caracteres do corpo no deep dive             | 2200    |
+| MAX_SYNTH_ITEMS         | Máximo de anotações usadas na síntese                  | 20      |
+| MAX_FUNCTION_DOC_ITEMS  | Máximo de funções detalhadas na seção por função       | 12      |
+| DEEP_MAX_WORDS          | Limite de palavras por função/classe no deep dive      | 80      |
+| SYNTH_MAX_WORDS         | Limite de palavras na síntese funcional do arquivo     | 260     |
+| FALLBACK_MAX_WORDS      | Limite de palavras no fallback sem funções detectadas  | 180     |
+| MAX_PROJECT_SUMMARY_ITEMS | Máximo de arquivos incluídos no resumo final         | 40      |
+| TELEMETRY_ENABLED       | Habilita escrita de telemetria JSONL                    | 1       |
+| TELEMETRY_LOG_DIR       | Diretório de logs persistentes dentro do container      | /output/logs |
+| TELEMETRY_LOG_FILE      | Arquivo JSONL das chamadas Ollama                       | ollama_telemetry.jsonl |
+| TRUNCATION_STATS_FILE   | Arquivo agregado por extensão/etapa                     | truncation_stats.json |
+| PROMPT_DEBUG_LOG        | Mostra preview do prompt no stdout do container         | 1       |
+| PROMPT_LOG_MAX_CHARS    | Tamanho máximo do preview do prompt                      | 1200    |
+| PROMPT_LOG_INCLUDE_FULL | Loga prompt completo (cuidado com volume)               | 0       |
+
+Esses valores podem ser ajustados no `.env` **sem editar o código**. O setup já gera os defaults recomendados.
+
+Os artefatos de telemetria ficam em `./logs/` no host (montado do container):
+- `ollama_telemetry.jsonl`: uma linha JSON por chamada/retry/erro
+- `truncation_stats.json`: agregados por extensão e etapa para tuning
+
+Se `./logs/` não estiver gravável, o analyzer usa fallback em `/tmp/documently-logs` dentro do container e registra aviso no stdout.
+
+Por padrão, a documentação agora prioriza entendimento funcional/regra de negócio e evita descrição linha a linha.
+
 # 🔍 Documently - Local Code Analyzer
 
 Analisa e documenta repositórios de código usando IA local (Ollama) via Docker, sem enviar nada para a nuvem.
@@ -201,3 +241,15 @@ rm -rf status/meu-contrato.json docs/meu-contrato/
 
 O setup detecta isso automaticamente e configura o Ollama para rodar via CPU.  
 Funciona com 8GB+ de RAM usando o modelo `qwen2.5-coder:3b`, apenas mais lento.
+
+## 🚦 Detecção de Framework (Feature 6)
+
+O Documently agora detecta automaticamente o framework principal do projeto de forma híbrida:
+- **Determinística:** por arquivos e dependências (ex: React, Gradle, Maven, Android)
+- **Fallback IA:** se não for possível determinar, usa IA local para sugerir o framework
+
+O framework detectado aparece no resumo do projeto e no status JSON.
+
+Exemplo de frameworks suportados: React, Vite, Angular, Maven, Gradle, Android, etc.
+
+Se não for possível identificar, retorna `unknown`.

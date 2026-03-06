@@ -318,6 +318,24 @@ def generate_env(model: dict, gpu: dict) -> dict:
         "OLLAMA_NUM_GPU_LAYERS":  str(gpu_layers),
         "OLLAMA_NUM_PARALLEL":    "1",
         "OLLAMA_MAX_LOADED_MODELS": "1",
+        # Novas variáveis para contexto e limites por etapa
+        "OLLAMA_NUM_CTX":         "4096",
+        "SCAN_NUM_PREDICT":      "512",
+        "DEEP_NUM_PREDICT":      "1024",
+        "SYNTH_NUM_PREDICT":     "1024",
+        "SUMMARY_NUM_PREDICT":   "1500",
+        "MAX_FUNCTION_DOC_ITEMS": "12",
+        "DEEP_MAX_WORDS":        "80",
+        "SYNTH_MAX_WORDS":       "260",
+        "FALLBACK_MAX_WORDS":    "180",
+        "HARDWARE_PROFILE":      "mid",
+        "TELEMETRY_ENABLED":     "1",
+        "TELEMETRY_LOG_DIR":     "/output/logs",
+        "TELEMETRY_LOG_FILE":    "ollama_telemetry.jsonl",
+        "TRUNCATION_STATS_FILE": "truncation_stats.json",
+        "PROMPT_DEBUG_LOG":      "1",
+        "PROMPT_LOG_MAX_CHARS":  "1200",
+        "PROMPT_LOG_INCLUDE_FULL": "0",
     }
 
 
@@ -409,6 +427,23 @@ def write_env(config: dict):
         "# Para reconfigurar: python3 setup.py\n",
         f"DOCKER_UID={uid}",
         f"DOCKER_GID={gid}",
+        "",
+        "# Limites de contexto e tokens por etapa (ajuste conforme necessário)",
+        "# HARDWARE_PROFILE: low, mid, high, ultra (auto ou override)",
+        "# OLLAMA_NUM_CTX: tamanho máximo do contexto (tokens) por chamada",
+        "# SCAN_NUM_PREDICT: tokens para etapa de scan (assinaturas)",
+        "# DEEP_NUM_PREDICT: tokens para deep dive (função/classe)",
+        "# SYNTH_NUM_PREDICT: tokens para síntese do arquivo",
+        "# SUMMARY_NUM_PREDICT: tokens para resumo do projeto",
+        "# MAX_FUNCTION_DOC_ITEMS: máximo de funções detalhadas por arquivo na seção por função",
+        "# DEEP_MAX_WORDS: limite de palavras por função/classe no deep dive",
+        "# SYNTH_MAX_WORDS: limite de palavras no resumo funcional por arquivo",
+        "# FALLBACK_MAX_WORDS: limite de palavras na análise de arquivos sem funções",
+        "# TELEMETRY_ENABLED: 1 para persistir telemetria JSONL de chamadas Ollama",
+        "# TELEMETRY_LOG_DIR: diretório de logs dentro do container (montado para ./logs)",
+        "# TRUNCATION_STATS_FILE: agregados por extensão/etapa para tuning",
+        "# PROMPT_DEBUG_LOG: log de preview do prompt no stdout do container",
+        "# PROMPT_LOG_INCLUDE_FULL: 1 para logar prompt completo (alto volume)",
         "",
     ]
     for key, value in config.items():
@@ -578,9 +613,9 @@ def main():
 
     # Cria pastas de output com permissão do usuário atual
     # evita que o Docker crie como root
-    for folder in ["docs", "status", "projects"]:
+    for folder in ["docs", "status", "projects", "logs"]:
         Path(folder).mkdir(exist_ok=True)
-    success("Pastas docs/ status/ projects/ garantidas com permissão correta")
+    success("Pastas docs/ status/ projects/ logs/ garantidas com permissão correta")
 
     # ── 4. Finaliza ───────────────────────────────────────────────────
     step("4 / 4  Tudo pronto!")
